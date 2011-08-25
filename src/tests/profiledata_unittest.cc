@@ -390,7 +390,7 @@ TEST_F(ProfileDataTest, OpsWhenStopped) {
 
   // Safe to call Add.
   const void *trace[] = { V(100), V(101), V(102), V(103), V(104) };
-  collector_.Add(arraysize(trace), trace);
+  collector_.Add(1, arraysize(trace), trace);
 
   ProfileData::State state_after;
   collector_.GetCurrentState(&state_after);
@@ -503,7 +503,7 @@ TEST_F(ProfileDataTest, CollectOne) {
   ExpectRunningSamples(0);
 
   const void *trace[] = { V(100), V(101), V(102), V(103), V(104) };
-  collector_.Add(arraysize(trace), trace);
+  collector_.Add(1, arraysize(trace), trace);
   ExpectRunningSamples(1);
 
   collector_.Stop();
@@ -528,7 +528,7 @@ TEST_F(ProfileDataTest, CollectTwoMatching) {
 
   for (int i = 0; i < 2; ++i) {
     const void *trace[] = { V(100), V(201), V(302), V(403), V(504) };
-    collector_.Add(arraysize(trace), trace);
+    collector_.Add(1, arraysize(trace), trace);
     ExpectRunningSamples(i + 1);
   }
 
@@ -555,11 +555,11 @@ TEST_F(ProfileDataTest, CollectTwoFlush) {
 
   const void *trace[] = { V(100), V(201), V(302), V(403), V(504) };
 
-  collector_.Add(arraysize(trace), trace);
+  collector_.Add(1, arraysize(trace), trace);
   ExpectRunningSamples(1);
   collector_.FlushTable();
 
-  collector_.Add(arraysize(trace), trace);
+  collector_.Add(1, arraysize(trace), trace);
   ExpectRunningSamples(2);
 
   collector_.Stop();

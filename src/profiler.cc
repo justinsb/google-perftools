@@ -122,7 +122,7 @@ class CpuProfiler {
   void DisableHandler();
 
   // Signal handler that records the interrupted pc in the profile data.
-  static void prof_handler(int sig, siginfo_t*, void* signal_ucontext,
+  static void prof_handler(int sig, siginfo_t*, void* signal_ucontext, uint32_t count,
                            void* cpu_profiler);
 };
 
@@ -258,7 +258,7 @@ void CpuProfiler::DisableHandler() {
 // access the data touched by prof_handler() disable this signal handler before
 // accessing the data and therefore cannot execute concurrently with
 // prof_handler().
-void CpuProfiler::prof_handler(int sig, siginfo_t*, void* signal_ucontext,
+void CpuProfiler::prof_handler(int sig, siginfo_t*, void* signal_ucontext, uint32_t count,
                                void* cpu_profiler) {
   CpuProfiler* instance = static_cast<CpuProfiler*>(cpu_profiler);
 
@@ -280,7 +280,7 @@ void CpuProfiler::prof_handler(int sig, siginfo_t*, void* signal_ucontext,
                                          2, signal_ucontext);
     depth++;  // To account for pc value in stack[0];
 
-    instance->collector_.Add(depth, stack);
+    instance->collector_.Add(count, depth, stack);
   }
 }
 
