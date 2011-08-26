@@ -68,9 +68,112 @@ struct ProfileHandlerToken {
   void* callback_arg;
 };
 
-typedef Atomic32 timer_count_t;
+class ProfileHandler;
 
-__thread timer_count_t thread_last_tick;
+// The ProfileEventSource is a strategy pattern for producing events we want to correlate to code
+// Currently: setitimer events for CPU profiling, interval events for wall-clock profiling
+// We could in future have a strategy that uses hardware performance events (e.g. cache misses)
+// It might even be possible to have usercode generated events (e.g. hashtable rehashes)
+class ProfileEventSource {
+protected:
+  ProfileHandler& handler_;
+public:
+  ProfileEventSource(ProfileHandler& handler) :
+    handler_(handler) {
+  }
+  virtual ~ProfileEventSource() {
+  }
+
+  // Registers the current thread with the profile handler. On systems which
+  // have a separate interval timer for each thread, this function starts the
+  // timer for the current thread.
+  //
+  // The function also attempts to determine whether or not timers are shared by
+  // all threads in the process.  (With LinuxThreads, and with NPTL on some
+  // Linux kernel versions, each thread has separate timers.)
+  //
+  // Prior to determining whether timers are shared, this function will
+  // unconditionally start the timer.  However, if this function determines
+  // that timers are shared, then it will stop the timer if no callbacks are
+  // currently registered.
+  virtual void RegisterThread(int callback_count) = 0;
+
+  // Called after a callback is registered / unregistered.
+  // The underlying event source could be stopped / started
+  // (but might not be, e.g. if we're don't yet know if timers are shared)
+  virtual void RegisteredCallback(int new_callback_count) = 0;
+  virtual void UnregisteredCallback(int new_callback_count) = 0;
+
+  // Resets state to the default
+  virtual void Reset() = 0;
+
+  // Gets the signal that should be monitored
+  virtual int GetSignal() { return SIGPROF; }
+
+  // Allow best-effort low-cost suppression of events.
+  // The thread stops simply sending events; the timer technique doesn't do anything
+  // Best-effort is OK because the caller is enabling/disabling the signal handler as well
+  virtual void EnableEvents() { }
+  virtual void DisableEvents() { }
+
+  // Gets the number of ticks that have elapsed since the last call
+  // When using wall-clock profiling, multiple signals might be sent during a syscall,
+  // but the signal handler is only called once.
+  // The tick count lets us know how many ticks took place.
+  virtual uint32_t GetTicksSinceLastCall() {
+    return 1;
+  }
+};
+
+class TimerProfileEventSource : public ProfileEventSource {
+public:
+  TimerProfileEventSource(ProfileHandler& handler, int timer_type) :
+    ProfileEventSource(handler), timer_type_(timer_type),
+    timer_sharing_(TIMERS_UNTOUCHED) {
+  }
+
+  void RegisterThread(int callback_count);
+  void Reset();
+
+  int GetSignal() {
+    return (timer_type_ == ITIMER_PROF ? SIGPROF : SIGALRM);
+  }
+
+  void RegisteredCallback(int new_callback_count);
+  void UnregisteredCallback(int new_callback_count);
+
+private:
+  // Returns true if the profile interval timer is enabled in the current
+  // thread.  This actually checks the kernel's interval timer setting.  (It is
+  // used to detect whether timers are shared or separate.)
+  bool IsTimerRunning() EXCLUSIVE_LOCKS_REQUIRED(control_lock_);
+
+  // Starts the interval timer.  If the thread library shares timers between
+  // threads, this function starts the shared timer. Otherwise, this will start
+  // the timer in the current thread.
+  void StartTimer();
+
+  // Stops the interval timer. If the thread library shares timers between
+  // threads, this fucntion stops the shared timer. Otherwise, this will stop
+  // the timer in the current thread.
+  void StopTimer();
+
+  // ITIMER_PROF (which uses SIGPROF), or ITIMER_REAL (which uses SIGALRM)
+  int timer_type_;
+
+  // Whether or not the threading system provides interval timers that are
+  // shared by all threads in a process.
+  enum {
+    // No timer initialization attempted yet.
+    TIMERS_UNTOUCHED,
+    // First thread has registered and set timer.
+    TIMERS_ONE_SET,
+    // Timers are shared by all threads.
+    TIMERS_SHARED,
+    // Timers are separate in each thread.
+    TIMERS_SEPARATE
+  } timer_sharing_ GUARDED_BY(control_lock_);
+};
 
 // This class manages profile timers and associated signal handler. This is a
 // a singleton.
@@ -113,6 +216,8 @@ class ProfileHandler {
   // Initializes and returns the ProfileHandler singleton.
   static ProfileHandler* Instance();
 
+  int32 GetFrequency() const { return frequency_; }
+
  private:
   ProfileHandler();
   ~ProfileHandler();
@@ -124,6 +229,12 @@ class ProfileHandler {
 
   // ProfileHandler singleton.
   static ProfileHandler* instance_;
+
+  // Our event source
+  ProfileEventSource* event_source_;
+
+  // Creates the event source strategy object
+  ProfileEventSource * BuildEventSource(const string& event_source_type = string());
 
   // pthread_once_t for one time initialization of ProfileHandler singleton.
   static pthread_once_t once_;
@@ -137,35 +248,8 @@ class ProfileHandler {
   // SIGPROF/SIGALRM interrupt frequency, read-only after construction.
   int32 frequency_;
 
-  // ITIMER_PROF (which uses SIGPROF), or ITIMER_REAL (which uses SIGALRM)
-  int timer_type_;
-  int timer_signal_;
-
   // Counts the number of callbacks registered.
   int32 callback_count_ GUARDED_BY(control_lock_);
-
-  // Whether or not the threading system provides interval timers that are
-  // shared by all threads in a process.
-  enum {
-    // No timer initialization attempted yet.
-    TIMERS_UNTOUCHED,
-    // First thread has registered and set timer.
-    TIMERS_ONE_SET,
-    // Timers are shared by all threads.
-    TIMERS_SHARED,
-    // Timers are separate in each thread.
-    TIMERS_SEPARATE
-  } timer_sharing_ GUARDED_BY(control_lock_);
-
-  // Members used when using the timer thread approach
-  pthread_t thread_;
-  bool thread_stop_;
-  bool thread_enable_;
-  bool use_timer_thread_;
-  static timer_count_t current_tick_;
-  typedef list<pthread_t> ThreadList;
-  typedef ThreadList::iterator ThreadListIterator;
-  ThreadList threads_ GUARDED_BY(control_lock__);
 
   // This lock serializes the registration of threads and protects the
   // callbacks_ list below.
@@ -193,21 +277,6 @@ class ProfileHandler {
   typedef CallbackList::iterator CallbackIterator;
   CallbackList callbacks_ GUARDED_BY(signal_lock_);
 
-  // Starts the interval timer.  If the thread library shares timers between
-  // threads, this function starts the shared timer. Otherwise, this will start
-  // the timer in the current thread.
-  void StartTimer() EXCLUSIVE_LOCKS_REQUIRED(control_lock_);
-
-  // Stops the interval timer. If the thread library shares timers between
-  // threads, this fucntion stops the shared timer. Otherwise, this will stop
-  // the timer in the current thread.
-  void StopTimer() EXCLUSIVE_LOCKS_REQUIRED(control_lock_);
-
-  // Returns true if the profile interval timer is enabled in the current
-  // thread.  This actually checks the kernel's interval timer setting.  (It is
-  // used to detect whether timers are shared or separate.)
-  bool IsTimerRunning() EXCLUSIVE_LOCKS_REQUIRED(control_lock_);
-
   // Sets the timer interrupt signal handler.
   void EnableHandler() EXCLUSIVE_LOCKS_REQUIRED(control_lock_);
 
@@ -217,19 +286,11 @@ class ProfileHandler {
   // SIGPROF/SIGALRM handler. Iterate over and call all the registered callbacks.
   static void SignalHandler(int sig, siginfo_t* sinfo, void* ucontext);
 
-  // Timer handler. Iterate over and call all the registered callbacks.
-  static void * TimerThread(void * arg);
-
-  bool IsUsingTimerThread() const {
-	  return use_timer_thread_;
-  }
-
   DISALLOW_COPY_AND_ASSIGN(ProfileHandler);
 };
 
 ProfileHandler* ProfileHandler::instance_ = NULL;
 pthread_once_t ProfileHandler::once_ = PTHREAD_ONCE_INIT;
-Atomic32 ProfileHandler::current_tick_ = 0;
 
 const int32 ProfileHandler::kMaxFrequency;
 const int32 ProfileHandler::kDefaultFrequency;
@@ -261,20 +322,11 @@ ProfileHandler* ProfileHandler::Instance() {
 
 ProfileHandler::ProfileHandler()
     : interrupts_(0),
-      callback_count_(0),
-      timer_sharing_(TIMERS_UNTOUCHED),
-      thread_(0),
-      thread_stop_(false),
-      thread_enable_(false),
-      use_timer_thread_(false) {
+      callback_count_(0) {
+
   SpinLockHolder cl(&control_lock_);
 
-  timer_type_ = (getenv("CPUPROFILE_REALTIME") ? ITIMER_REAL : ITIMER_PROF);
-  timer_signal_ = (timer_type_ == ITIMER_PROF ? SIGPROF : SIGALRM);
-
-  if (getenv("CPUPROFILE_THREAD")) {
-	  use_timer_thread_ = true;
-  }
+  event_source_ = BuildEventSource();
 
   // Get frequency of interrupts (if specified)
   char junk;
@@ -298,15 +350,10 @@ ProfileHandler::~ProfileHandler() {
 
 void ProfileHandler::RegisterThread() {
   SpinLockHolder cl(&control_lock_);
+  event_source_->RegisterThread(callback_count_);
+}
 
-  if (IsUsingTimerThread()) {
-	  {
-		  RAW_LOG(INFO, "Registered thread");
-//	    SpinLockHolder sl(&control_lock);
-	    threads_.push_back(pthread_self());
-	  }
-  }
-
+void TimerProfileEventSource::RegisterThread(int callback_count) {
   // We try to detect whether timers are being shared by setting a
   // timer in the first call to this function, then checking whether
   // it's set in the second call.
@@ -333,7 +380,7 @@ void ProfileHandler::RegisterThread() {
         timer_sharing_ = TIMERS_SHARED;
         // If callback is already registered, we have to keep the timer
         // running.  If not, we disable the timer here.
-        if (callback_count_ == 0) {
+        if (callback_count == 0) {
           StopTimer();
         }
       } else {
@@ -360,13 +407,17 @@ ProfileHandlerToken* ProfileHandler::RegisterCallback(
     SpinLockHolder sl(&signal_lock_);
     callbacks_.push_back(token);
   }
-  // Start the timer if timer is shared and this is a first callback.
-  if ((callback_count_ == 0) && (timer_sharing_ == TIMERS_SHARED)) {
-    StartTimer();
-  }
   ++callback_count_;
+  event_source_->RegisteredCallback(callback_count_);
   EnableHandler();
   return token;
+}
+
+void TimerProfileEventSource::RegisteredCallback(int new_callback_count) {
+  // Start the timer if timer is shared and this is a first callback.
+  if ((new_callback_count == 1) && (timer_sharing_ == TIMERS_SHARED)) {
+    StartTimer();
+  }
 }
 
 void ProfileHandler::UnregisterCallback(ProfileHandlerToken* token) {
@@ -384,14 +435,19 @@ void ProfileHandler::UnregisterCallback(ProfileHandlerToken* token) {
       --callback_count_;
       if (callback_count_ > 0) {
         EnableHandler();
-      } else if (timer_sharing_ == TIMERS_SHARED) {
-        StopTimer();
       }
+      event_source_->UnregisteredCallback(callback_count_);
       return;
     }
   }
   // Unknown token.
   RAW_LOG(FATAL, "Invalid token");
+}
+
+void TimerProfileEventSource::UnregisteredCallback(int new_callback_count) {
+  if (new_callback_count == 0 && timer_sharing_ == TIMERS_SHARED) {
+    StopTimer();
+  }
 }
 
 void ProfileHandler::Reset() {
@@ -408,6 +464,10 @@ void ProfileHandler::Reset() {
     }
   }
   callback_count_ = 0;
+  event_source_->Reset();
+}
+
+void TimerProfileEventSource::Reset() {
   if (timer_sharing_ == TIMERS_SHARED) {
     StopTimer();
   }
@@ -428,105 +488,21 @@ void ProfileHandler::GetState(ProfileHandlerState* state) {
   state->callback_count = callback_count_;
 }
 
-void * ProfileHandler::TimerThread(void * arg) {
-	ProfileHandler * profileHandler = (ProfileHandler*) arg;
-
-	while (!profileHandler->thread_stop_) {
-		::base::subtle::Barrier_AtomicIncrement(&ProfileHandler::current_tick_, 1);
-
-		if (profileHandler->thread_enable_) {
-			RAW_CHECK(instance_ != NULL, "ProfileHandler is not initialized");
-			  {
-				SpinLockHolder sl(&instance_->control_lock_);
-
-				for (ThreadListIterator it = instance_->threads_.begin();
-					 it != instance_->threads_.end();
-					 ++it) {
-					if (pthread_kill(*it, instance_->timer_signal_)) {
-						// TODO: Check err, remove thread from list if it has ended
-						RAW_LOG(WARNING, "Error sending signal");
-					}
-//					else
-//					{
-//						RAW_LOG(INFO, "Sent signal to %ld", *it);
-//					}
-				}
-			  }
-		}
-
-		__useconds_t sleep_us = 1000000 / profileHandler->frequency_;
-		usleep(sleep_us);
-	}
-
-	RAW_LOG(INFO, "TimerThread exiting");
-
-	return 0;
-}
-
-void ProfileHandler::StartTimer() {
-	if (IsUsingTimerThread()) {
-		if (thread_) {
-			RAW_LOG(FATAL, "Timer already running");
-		}
-		RAW_LOG(INFO, "Starting timer thread");
-
-		thread_stop_ = false;
-		pthread_t thread;
-		pthread_attr_t attr;
-		if (pthread_attr_init(&attr)) {
-			RAW_LOG(FATAL, "Cannot initialize pthread_attr_t");
-		}
-		int scheduler = sched_getscheduler(getpid());
-		if (scheduler == -1) {
-			  RAW_LOG(FATAL, "Cannot get current scheduler");
-		}
-		int max_priority = sched_get_priority_max(scheduler);
-		if (max_priority == -1) {
-			  RAW_LOG(FATAL, "Cannot get max priority");
-		}
-		sched_param sched;
-		sched.__sched_priority = max_priority;
-		if (pthread_attr_setschedparam(&attr, &sched)) {
-			RAW_LOG(FATAL, "Cannot set timer thread priority");
-		}
-		if (pthread_create (&thread,&attr,TimerThread,this)) {
-			  RAW_LOG(FATAL, "Cannot create timer thread");
-		}
-		pthread_attr_destroy(&attr);
-
-		thread_ = thread;
-		return;
-	}
-
+void TimerProfileEventSource::StartTimer() {
   struct itimerval timer;
   timer.it_interval.tv_sec = 0;
-  timer.it_interval.tv_usec = 1000000 / frequency_;
+  timer.it_interval.tv_usec = 1000000 / handler_.GetFrequency();
   timer.it_value = timer.it_interval;
   setitimer(timer_type_, &timer, 0);
 }
 
-void ProfileHandler::StopTimer() {
-	if (IsUsingTimerThread()) {
-		if (thread_) {
-			thread_stop_ = true;
-			if (pthread_join(thread_, NULL)) {
-				RAW_LOG(FATAL, "Cannot stop timer thread %d", errno);
-			}
-			thread_ = 0;
-		}
-		return;
-	}
-
+void TimerProfileEventSource::StopTimer() {
   struct itimerval timer;
   memset(&timer, 0, sizeof timer);
   setitimer(timer_type_, &timer, 0);
 }
 
-bool ProfileHandler::IsTimerRunning() {
-	if (IsUsingTimerThread()) {
-		return thread_ != 0;
-	}
-
+bool TimerProfileEventSource::IsTimerRunning() {
   struct itimerval current_timer;
   RAW_CHECK(0 == getitimer(timer_type_, &current_timer), "getitimer");
   return (current_timer.it_value.tv_sec != 0 ||
@@ -534,34 +510,24 @@ bool ProfileHandler::IsTimerRunning() {
 }
 
 void ProfileHandler::EnableHandler() {
-	if (IsUsingTimerThread()) {
-		thread_enable_ = true;
-		// Fall through for signal handler
-	}
-
-	RAW_LOG(INFO, "Enabling handler");
+  event_source_->EnableEvents();
 
   struct sigaction sa;
   sa.sa_sigaction = SignalHandler;
   sa.sa_flags = SA_RESTART | SA_SIGINFO;
   sigemptyset(&sa.sa_mask);
-  const int signal_number = timer_signal_;
+  const int signal_number = event_source_->GetSignal();
   RAW_CHECK(sigaction(signal_number, &sa, NULL) == 0, "sigprof (enable)");
 }
 
 void ProfileHandler::DisableHandler() {
-	if (IsUsingTimerThread()) {
-		thread_enable_ = false;
-		// Fall through for signal handler
-	}
+  event_source_->DisableEvents();
 
-	RAW_LOG(INFO, "Disabling handler");
-
-	struct sigaction sa;
+  struct sigaction sa;
   sa.sa_handler = SIG_IGN;
   sa.sa_flags = SA_RESTART;
   sigemptyset(&sa.sa_mask);
-  const int signal_number = timer_signal_;
+  const int signal_number = event_source_->GetSignal();
   RAW_CHECK(sigaction(signal_number, &sa, NULL) == 0, "sigprof (disable)");
 }
 
@@ -569,33 +535,51 @@ void ProfileHandler::SignalHandler(int sig, siginfo_t* sinfo, void* ucontext) {
   int saved_errno = errno;
   RAW_CHECK(instance_ != NULL, "ProfileHandler is not initialized");
   {
-		SpinLockHolder sl(&instance_->signal_lock_);
+    SpinLockHolder sl(&instance_->signal_lock_);
 
-		timer_count_t ticks = 1;
-		if (instance_->IsUsingTimerThread()) {
-		timer_count_t system_time = ::base::subtle::Acquire_Load(&ProfileHandler::current_tick_);
-		timer_count_t thread_time =  ::base::subtle::Acquire_Load(&thread_last_tick);
-
-		ticks = (system_time > thread_time) ? (system_time - thread_time) : (thread_time - system_time);
-		 if (ticks == 0) {
-			 RAW_LOG(WARNING, "SignalHandler ticks == 0 %ld %ld", system_time, thread_time);
-		 } else if (ticks != 1) {
-			 RAW_LOG(WARNING, "SignalHandler ticks != 1 %ld", ticks);
-		 }
-		 ::base::subtle::Release_Store(&thread_last_tick, system_time);
-		}
-
+    uint32_t ticks = instance_->event_source_->GetTicksSinceLastCall();
 
     ++instance_->interrupts_;
-    for (CallbackIterator it = instance_->callbacks_.begin();
-         it != instance_->callbacks_.end();
-         ++it) {
-      (*it)->callback(sig, sinfo, ucontext, ticks, (*it)->callback_arg);
+    if (ticks != 0) {
+      for (CallbackIterator it = instance_->callbacks_.begin();
+           it != instance_->callbacks_.end();
+           ++it) {
+        (*it)->callback(sig, sinfo, ucontext, ticks, (*it)->callback_arg);
+      }
     }
   }
   errno = saved_errno;
 }
 
+#include "profile-eventsource-timerthread.cc"
+
+ProfileEventSource * ProfileHandler::BuildEventSource(const string& event_source_type) {
+  string use_event_source_type = event_source_type;
+  if (use_event_source_type.empty()) {
+    if (getenv("CPUPROFILE_EVENT")) {
+      // A direct specification takes priority
+      use_event_source_type = getenv("CPUPROFILE_EVENT");
+    } else if (getenv("CPUPROFILE_REALTIME")) {
+      // Use the realtime timer if any value is set for CPUPROFILE_REALTIME (even empty)
+      use_event_source_type = "timer-realtime";
+    }
+
+    if (use_event_source_type.empty()) {
+      use_event_source_type = "timer-cpu";
+    }
+  }
+
+  if (use_event_source_type == "timer-realtime") {
+    // Profiling using the "real-time" profiler - problematic with multi-threaded code
+    return new TimerProfileEventSource(*this, ITIMER_REAL);
+  } else if (use_event_source_type == "thread-wallclock") {
+    // Wall clock profiling
+    return new ThreadProfileEventSource(*this);
+  } else {
+    // Default - CPU focused profiling
+    return new TimerProfileEventSource(*this, ITIMER_PROF);
+  }
+}
 
 // The sole purpose of this class is to initialize the ProfileHandler singleton
 // when the global static objects are created. Note that the main thread will

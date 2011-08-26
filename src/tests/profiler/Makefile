@@ -18,7 +18,7 @@ profile_rt.prof : test
 	CPUPROFILE=$@ CPUPROFILE_REALTIME=1 ./test
 
 profile_timer.prof : test
-	CPUPROFILE=$@ CPUPROFILE_THREAD=1 ./test
+	CPUPROFILE=$@ CPUPROFILE_EVENT=thread-wallclock ./test
 
 %.pdf: %.prof
 	pprof ./test $< -pdf > $@
