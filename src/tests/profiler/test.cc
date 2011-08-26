@@ -92,7 +92,9 @@ int do_io_bound() {
 
 	char * filename = new char[256];
 
-	sprintf(filename, "tempfile%d", getpid());
+	sprintf(filename, "tempfile%ld", pthread_self());
+
+	printf("Using tmpfile %s\n", filename);
 
 	int fd;
 	if ((fd = creat(filename, S_IWUSR)) < 0) {
@@ -109,7 +111,7 @@ int do_io_bound() {
 			return 1;
 		}
 
-		printf("write() wrote %d bytes\n", wrote);
+		printf("write() wrote %d bytes, doing fsync\n", wrote);
 		if (fsync(fd)) {
 			perror("fsync() error");
 			return 1;
@@ -117,7 +119,10 @@ int do_io_bound() {
 	}
 
 	close(fd);
-	unlink(filename);
+	if (unlink(filename)) {
+		perror("Error deleting temp file");
+		return 1;
+	}
 
 	delete[] filename;
 	delete[] buffer;
@@ -140,21 +145,32 @@ void * thread_start(void*) {
 }
 
 int main() {
-	int rep_count = 2;
+	const int rep_count = 2;
+
+	pthread_t threads[rep_count];
 
 	for (int i = 0; i < rep_count; i++) {
 		//do_test();
-		pthread_t thread;
 		const pthread_attr_t * attr = 0;
-		if (pthread_create(&thread, attr, &thread_start, 0)) {
+		if (pthread_create(&threads[i], attr, &thread_start, 0)) {
 			perror("Could not create thread");
 			exit(1);
 		}
 	}
 
-	// Stupid busy wait
+
+#ifdef USE_BUSY_WAIT
+	// If we want the main thread to be CPU bound
 	while (__sync_fetch_and_add(&threads_done, 0) != rep_count) {
 	}
+#else
+	for (int i = 0; i < rep_count; i++) {
+		if (pthread_join(threads[i], 0)) {
+			perror("Error waiting for thread");
+			exit(1);
+		}
+	}
+#endif
 
 	cout << "Done!";
 }
