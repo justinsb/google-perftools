@@ -68,7 +68,9 @@ struct ProfileHandlerToken {
   void* callback_arg;
 };
 
-__thread uint32_t thread_last_tick;
+typedef Atomic32 timer_count_t;
+
+__thread timer_count_t thread_last_tick;
 
 // This class manages profile timers and associated signal handler. This is a
 // a singleton.
@@ -160,7 +162,7 @@ class ProfileHandler {
   bool thread_stop_;
   bool thread_enable_;
   bool use_timer_thread_;
-  static uint32_t current_tick_;
+  static timer_count_t current_tick_;
   typedef list<pthread_t> ThreadList;
   typedef ThreadList::iterator ThreadListIterator;
   ThreadList threads_ GUARDED_BY(control_lock__);
@@ -227,7 +229,7 @@ class ProfileHandler {
 
 ProfileHandler* ProfileHandler::instance_ = NULL;
 pthread_once_t ProfileHandler::once_ = PTHREAD_ONCE_INIT;
-uint32_t ProfileHandler::current_tick_ = 0;
+Atomic32 ProfileHandler::current_tick_ = 0;
 
 const int32 ProfileHandler::kMaxFrequency;
 const int32 ProfileHandler::kDefaultFrequency;
@@ -430,7 +432,7 @@ void * ProfileHandler::TimerThread(void * arg) {
 	ProfileHandler * profileHandler = (ProfileHandler*) arg;
 
 	while (!profileHandler->thread_stop_) {
-		ProfileHandler::current_tick_++;
+		::base::subtle::Barrier_AtomicIncrement(&ProfileHandler::current_tick_, 1);
 
 		if (profileHandler->thread_enable_) {
 			RAW_CHECK(instance_ != NULL, "ProfileHandler is not initialized");
@@ -569,13 +571,20 @@ void ProfileHandler::SignalHandler(int sig, siginfo_t* sinfo, void* ucontext) {
   {
 		SpinLockHolder sl(&instance_->signal_lock_);
 
-		uint32_t system_time = ProfileHandler::current_tick_;
-		uint32_t thread_time = thread_last_tick;
+		timer_count_t ticks = 1;
+		if (instance_->IsUsingTimerThread()) {
+		timer_count_t system_time = ::base::subtle::Acquire_Load(&ProfileHandler::current_tick_);
+		timer_count_t thread_time =  ::base::subtle::Acquire_Load(&thread_last_tick);
 
-		uint32_t ticks = (system_time > thread_time) ? system_time - thread_time : thread_time - system_time;
-		  RAW_CHECK(ticks > 0, "SignalHandler ticks == 0");
+		ticks = (system_time > thread_time) ? (system_time - thread_time) : (thread_time - system_time);
+		 if (ticks == 0) {
+			 RAW_LOG(WARNING, "SignalHandler ticks == 0 %ld %ld", system_time, thread_time);
+		 } else if (ticks != 1) {
+			 RAW_LOG(WARNING, "SignalHandler ticks != 1 %ld", ticks);
+		 }
+		 ::base::subtle::Release_Store(&thread_last_tick, system_time);
+		}
 
-		thread_last_tick = system_time;
 
     ++instance_->interrupts_;
     for (CallbackIterator it = instance_->callbacks_.begin();
