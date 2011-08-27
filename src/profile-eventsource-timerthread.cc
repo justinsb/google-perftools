@@ -113,12 +113,30 @@ void * ThreadProfileEventSource::TimerThreadMain(void * arg) {
       {
         SpinLockHolder sl(&instance->lock_);
 
-        for (ThreadListIterator it = instance->threads_.begin(); it
-            != instance->threads_.end(); ++it) {
-          if (pthread_kill(*it, SIGPROF)) {
-            // TODO: Check err, remove thread from list if it has ended
-            RAW_LOG(WARNING, "Error sending signal");
+        ThreadList& threads = instance->threads_;
+
+        for (ThreadListIterator it = threads.begin(); it != threads.end(); ) {
+          int err = pthread_kill(*it, SIGPROF);
+          if (err) {
+            switch (err) {
+            case ESRCH:
+              //RAW_LOG(INFO, "Removing finished thread %ld", *it);
+              it = threads.erase(it);
+              continue;
+
+            case EINVAL:
+              // Shouldn't happen
+              RAW_LOG(WARNING, "Error sending signal: EINVAL");
+              break;
+
+            default:
+              // _Really_ shouldn't happen
+              RAW_LOG(WARNING, "Unknown error sending signal: %d", err);
+              break;
+            }
           }
+
+          ++it;
         }
       }
     }
