@@ -35,6 +35,7 @@
 
 #include "config.h"
 #include "profile-handler.h"
+#include "google/profiler_extension.h"
 
 #if !(defined(__CYGWIN__) || defined(__CYGWIN32__)) && !defined(__native_client__)
 
@@ -49,6 +50,7 @@
 #include "base/logging.h"
 #include "base/spinlock.h"
 #include "maybe_threads.h"
+#include <dlfcn.h>
 
 using std::list;
 using std::string;
@@ -66,63 +68,6 @@ struct ProfileHandlerToken {
   ProfileHandlerCallback callback;
   // Argument for the callback function.
   void* callback_arg;
-};
-
-class ProfileHandler;
-
-// The ProfileEventSource is a strategy pattern for producing events we want to correlate to code
-// Currently: setitimer events for CPU profiling, interval events for wall-clock profiling
-// We could in future have a strategy that uses hardware performance events (e.g. cache misses)
-// It might even be possible to have usercode generated events (e.g. hashtable rehashes)
-class ProfileEventSource {
-protected:
-  ProfileHandler& handler_;
-public:
-  ProfileEventSource(ProfileHandler& handler) :
-    handler_(handler) {
-  }
-  virtual ~ProfileEventSource() {
-  }
-
-  // Registers the current thread with the profile handler. On systems which
-  // have a separate interval timer for each thread, this function starts the
-  // timer for the current thread.
-  //
-  // The function also attempts to determine whether or not timers are shared by
-  // all threads in the process.  (With LinuxThreads, and with NPTL on some
-  // Linux kernel versions, each thread has separate timers.)
-  //
-  // Prior to determining whether timers are shared, this function will
-  // unconditionally start the timer.  However, if this function determines
-  // that timers are shared, then it will stop the timer if no callbacks are
-  // currently registered.
-  virtual void RegisterThread(int callback_count) = 0;
-
-  // Called after a callback is registered / unregistered.
-  // The underlying event source could be stopped / started
-  // (but might not be, e.g. if we're don't yet know if timers are shared)
-  virtual void RegisteredCallback(int new_callback_count) = 0;
-  virtual void UnregisteredCallback(int new_callback_count) = 0;
-
-  // Resets state to the default
-  virtual void Reset() = 0;
-
-  // Gets the signal that should be monitored
-  virtual int GetSignal() { return SIGPROF; }
-
-  // Allow best-effort low-cost suppression of events.
-  // The thread stops simply sending events; the timer technique doesn't do anything
-  // Best-effort is OK because the caller is enabling/disabling the signal handler as well
-  virtual void EnableEvents() { }
-  virtual void DisableEvents() { }
-
-  // Gets the number of ticks that have elapsed since the last call
-  // When using wall-clock profiling, multiple signals might be sent during a syscall,
-  // but the signal handler is only called once.
-  // The tick count lets us know how many ticks took place.
-  virtual uint32_t GetTicksSinceLastCall() {
-    return 1;
-  }
 };
 
 class TimerProfileEventSource : public ProfileEventSource {
@@ -235,6 +180,7 @@ class ProfileHandler {
 
   // Creates the event source strategy object
   ProfileEventSource * BuildEventSource(const string& event_source_type = string());
+  ProfileEventSource * LoadExtensionEventSource(const string& event_source_type);
 
   // pthread_once_t for one time initialization of ProfileHandler singleton.
   static pthread_once_t once_;
@@ -285,6 +231,8 @@ class ProfileHandler {
 
   // SIGPROF/SIGALRM handler. Iterate over and call all the registered callbacks.
   static void SignalHandler(int sig, siginfo_t* sinfo, void* ucontext);
+
+  static void FireBacktraceCallbacks(uint32 count, void**backtrace, uint32 depth);
 
   DISALLOW_COPY_AND_ASSIGN(ProfileHandler);
 };
@@ -544,14 +492,75 @@ void ProfileHandler::SignalHandler(int sig, siginfo_t* sinfo, void* ucontext) {
       for (CallbackIterator it = instance_->callbacks_.begin();
            it != instance_->callbacks_.end();
            ++it) {
-        (*it)->callback(sig, sinfo, ucontext, ticks, (*it)->callback_arg);
+        (*it)->callback(sig, sinfo, ucontext, ticks, 0, 0, (*it)->callback_arg);
       }
     }
   }
   errno = saved_errno;
 }
 
+void ProfileHandler::FireBacktraceCallbacks(uint32 count, void**backtrace, uint32 depth) {
+  // Do we need to do this??
+  int saved_errno = errno;
+  RAW_CHECK(instance_ != NULL, "ProfileHandler is not initialized");
+  {
+    SpinLockHolder sl(&instance_->signal_lock_);
+
+//    ++instance_->interrupts_;
+    if (count != 0) {
+      for (CallbackIterator it = instance_->callbacks_.begin();
+           it != instance_->callbacks_.end();
+           ++it) {
+        (*it)->callback(0, 0, 0, count, backtrace, depth, (*it)->callback_arg);
+      }
+    }
+  }
+  errno = saved_errno;
+}
+
+
 #include "profile-eventsource-timerthread.cc"
+
+ProfileEventSource * ProfileHandler::LoadExtensionEventSource(
+    const string& extension_spec) {
+  void * handle = dlopen(0, RTLD_LAZY);
+  if (!handle) {
+    RAW_LOG(WARNING, "Error doing dlopen to load extension %s", dlerror());
+    return 0;
+  }
+
+  string symbol_name = "google_perftools_extension_load_";
+  string args;
+
+  int equals_pos = extension_spec.find('=');
+  if (equals_pos == string::npos) {
+    symbol_name.append(extension_spec);
+  } else {
+    symbol_name.append(extension_spec.substr(0, equals_pos));
+    args.assign(extension_spec.substr(equals_pos + 1));
+  }
+
+  void * symbol = dlsym(handle, symbol_name.c_str());
+  if (!symbol) {
+    RAW_LOG(WARNING, "Could not find extension plugin function: %s", dlerror());
+    return 0;
+  }
+
+  ProfilerHandlerExtensionFn fn = (ProfilerHandlerExtensionFn) symbol;
+
+  ProfileEventSource * eventSource = fn(frequency_, args.c_str(),
+      FireBacktraceCallbacks);
+  if (!eventSource) {
+    RAW_LOG(WARNING, "Extension plugin returned NULL");
+  }
+
+  if (dlclose(handle)) {
+    RAW_LOG(WARNING, "Error doing dlclose when loading extension: %s",
+        dlerror());
+  }
+
+  return eventSource;
+}
 
 ProfileEventSource * ProfileHandler::BuildEventSource(const string& event_source_type) {
   // Precedence of settings:
@@ -582,6 +591,13 @@ ProfileEventSource * ProfileHandler::BuildEventSource(const string& event_source
   } else if (use_event_source_type == "thread-wallclock") {
     // Wall clock profiling
     return new ThreadProfileEventSource(frequency_);
+  } else if (0 == use_event_source_type.compare(0, 10, "extension-")) {
+    // Load an extension (still needs to be linked, but need not be in the perftools project)
+    ProfileEventSource * eventSource = LoadExtensionEventSource(use_event_source_type.substr(10));
+    if (!eventSource) {
+      RAW_LOG(FATAL, "Could not load custom event source: %s", use_event_source_type.c_str());
+    }
+    return eventSource;
   } else {
     // Default - CPU focused profiling
     return new TimerProfileEventSource(frequency_, ITIMER_PROF);

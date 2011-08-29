@@ -1139,7 +1139,9 @@ S_CPU_PROFILER_INCLUDES = src/profiledata.h \
                           $(SPINLOCK_INCLUDES) \
                           $(LOGGING_INCLUDES)
 SG_CPU_PROFILER_INCLUDES = src/google/profiler.h \
-                           src/google/stacktrace.h
+                           src/google/stacktrace.h \
+                           src/google/profiler_extension.h
+
 CPU_PROFILER_INCLUDES = $(S_CPU_PROFILER_INCLUDES) $(SG_CPU_PROFILER_INCLUDES)
 googleinclude_HEADERS += $(SG_CPU_PROFILER_INCLUDES)
 
@@ -1153,7 +1155,7 @@ libprofiler_la_LIBADD = libstacktrace.la
 # We have to include ProfileData for profiledata_unittest
 CPU_PROFILER_SYMBOLS = '(ProfilerStart|ProfilerStartWithOptions|ProfilerStop|ProfilerFlush|ProfilerEnable|ProfilerDisable|ProfilingIsEnabledForAllThreads|ProfilerRegisterThread|ProfilerGetCurrentState|ProfilerState|ProfileData|ProfileHandler)'
 libprofiler_la_LDFLAGS = -export-symbols-regex $(CPU_PROFILER_SYMBOLS) \
-                         -version-info @PROFILER_SO_VERSION@
+                         -version-info @PROFILER_SO_VERSION@ -ldl
 
 # See discussion above (under LIBTCMALLOC_MINIMAL) for why we do this.
 # Basically it's to work around systems where --rpath doesn't work right.
@@ -1245,7 +1247,7 @@ libtcmalloc_and_profiler_la_CXXFLAGS = $(libtcmalloc_la_CXXFLAGS) $(libprofiler_
 # Since this library is meant to be used as a .a, I don't worry as much
 # about .so versioning.  I just give the libtcmalloc version number.
 # TODO(csilvers): use -export-symbols-regex?
-libtcmalloc_and_profiler_la_LDFLAGS = $(PTHREAD_CFLAGS) \
+libtcmalloc_and_profiler_la_LDFLAGS = $(PTHREAD_CFLAGS) -ldl \
                                       -version-info @TCMALLOC_SO_VERSION@
 # We don't include libprofiler_la_LIBADD here because all it adds is
 # libstacktrace.la, which we already get via libtcmalloc.  Trying to
