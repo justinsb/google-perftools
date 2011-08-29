@@ -90,8 +90,7 @@ struct ProfileHandlerToken;
  *   - Release lock.
  *   and the callback code gets a lockless, read-write access to the data.
  */
-typedef void (*ProfileHandlerCallback)(int sig, siginfo_t* sig_info, void* ucontext,
-                                       uint32_t count, void* *backtrace, uint32_t depth,
+typedef void (*ProfileHandlerCallback)(uint32_t count, void* *backtrace, uint32_t depth,
                                        void* callback_arg);
 
 /*
