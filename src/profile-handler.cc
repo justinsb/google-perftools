@@ -127,8 +127,8 @@ public:
 
 class TimerProfileEventSource : public ProfileEventSource {
 public:
-  TimerProfileEventSource(ProfileHandler& handler, int timer_type) :
-    ProfileEventSource(handler), timer_type_(timer_type),
+  TimerProfileEventSource(int32 frequency, int timer_type) :
+    frequency_(frequency), timer_type_(timer_type),
     timer_sharing_(TIMERS_UNTOUCHED) {
   }
 
@@ -157,6 +157,8 @@ private:
   // threads, this fucntion stops the shared timer. Otherwise, this will stop
   // the timer in the current thread.
   void StopTimer();
+
+  int32 frequency_;
 
   // ITIMER_PROF (which uses SIGPROF), or ITIMER_REAL (which uses SIGALRM)
   int timer_type_;
@@ -215,8 +217,6 @@ class ProfileHandler {
 
   // Initializes and returns the ProfileHandler singleton.
   static ProfileHandler* Instance();
-
-  int32 GetFrequency() const { return frequency_; }
 
  private:
   ProfileHandler();
@@ -326,8 +326,6 @@ ProfileHandler::ProfileHandler()
 
   SpinLockHolder cl(&control_lock_);
 
-  event_source_ = BuildEventSource();
-
   // Get frequency of interrupts (if specified)
   char junk;
   const char* fr = getenv("CPUPROFILE_FREQUENCY");
@@ -338,6 +336,8 @@ ProfileHandler::ProfileHandler()
   } else {
     frequency_ = kDefaultFrequency;
   }
+
+  event_source_ = BuildEventSource();
 
   // Ignore signals until we decide to turn profiling on.  (Paranoia;
   // should already be ignored.)
@@ -491,7 +491,7 @@ void ProfileHandler::GetState(ProfileHandlerState* state) {
 void TimerProfileEventSource::StartTimer() {
   struct itimerval timer;
   timer.it_interval.tv_sec = 0;
-  timer.it_interval.tv_usec = 1000000 / handler_.GetFrequency();
+  timer.it_interval.tv_usec = 1000000 / frequency_;
   timer.it_value = timer.it_interval;
   setitimer(timer_type_, &timer, 0);
 }
@@ -571,13 +571,13 @@ ProfileEventSource * ProfileHandler::BuildEventSource(const string& event_source
 
   if (use_event_source_type == "timer-realtime") {
     // Profiling using the "real-time" profiler - problematic with multi-threaded code
-    return new TimerProfileEventSource(*this, ITIMER_REAL);
+    return new TimerProfileEventSource(frequency_, ITIMER_REAL);
   } else if (use_event_source_type == "thread-wallclock") {
     // Wall clock profiling
-    return new ThreadProfileEventSource(*this);
+    return new ThreadProfileEventSource(frequency_);
   } else {
     // Default - CPU focused profiling
-    return new TimerProfileEventSource(*this, ITIMER_PROF);
+    return new TimerProfileEventSource(frequency_, ITIMER_PROF);
   }
 }
 

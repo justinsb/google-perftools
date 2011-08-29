@@ -9,9 +9,9 @@ class ThreadProfileEventSource : public ProfileEventSource {
 public:
   typedef Atomic32 timer_count_t;
 
-  ThreadProfileEventSource(ProfileHandler& handler) :
-    ProfileEventSource(handler), thread_(0), thread_stop_(false),
-        events_enabled_(false) {
+  ThreadProfileEventSource(int32 frequency) :
+    thread_(0), thread_stop_(false),
+        events_enabled_(false), frequency_(frequency) {
   }
 
   void RegisterThread(int callback_count);
@@ -38,6 +38,7 @@ private:
   pthread_t thread_;
   bool thread_stop_;
   bool events_enabled_;
+  int32 frequency_;
 
   // Keep track of "time"
   static __thread timer_count_t thread_last_tick;
@@ -101,7 +102,7 @@ void ThreadProfileEventSource::StartTimerThread() {
 void * ThreadProfileEventSource::TimerThreadMain(void * arg) {
   ThreadProfileEventSource * instance = (ThreadProfileEventSource*) arg;
 
-  __useconds_t sleep_us = 1000000 / instance->handler_.GetFrequency();
+  __useconds_t sleep_us = 1000000 / instance->frequency_;
 
   RAW_CHECK(instance->GetSignal() == SIGPROF, "Registered signal was not SIGPROF");
 
