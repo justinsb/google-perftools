@@ -24,6 +24,8 @@ public:
     events_enabled_ = true;
   }
 
+  virtual int GetSignal() { return SIGPROF; }
+
   void RegisteredCallback(int new_callback_count);
   void UnregisteredCallback(int new_callback_count);
 

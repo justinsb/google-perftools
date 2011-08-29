@@ -463,23 +463,29 @@ bool TimerProfileEventSource::IsTimerRunning() {
 void ProfileHandler::EnableHandler() {
   event_source_->EnableEvents();
 
-  struct sigaction sa;
-  sa.sa_sigaction = SignalHandler;
-  sa.sa_flags = SA_RESTART | SA_SIGINFO;
-  sigemptyset(&sa.sa_mask);
   const int signal_number = event_source_->GetSignal();
-  RAW_CHECK(sigaction(signal_number, &sa, NULL) == 0, "sigprof (enable)");
+
+  if (signal_number) {
+    struct sigaction sa;
+    sa.sa_sigaction = SignalHandler;
+    sa.sa_flags = SA_RESTART | SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    RAW_CHECK(sigaction(signal_number, &sa, NULL) == 0, "sigprof (enable)");
+  }
 }
 
 void ProfileHandler::DisableHandler() {
   event_source_->DisableEvents();
 
-  struct sigaction sa;
-  sa.sa_handler = SIG_IGN;
-  sa.sa_flags = SA_RESTART;
-  sigemptyset(&sa.sa_mask);
   const int signal_number = event_source_->GetSignal();
-  RAW_CHECK(sigaction(signal_number, &sa, NULL) == 0, "sigprof (disable)");
+
+  if (signal_number) {
+    struct sigaction sa;
+    sa.sa_handler = SIG_IGN;
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    RAW_CHECK(sigaction(signal_number, &sa, NULL) == 0, "sigprof (disable)");
+  }
 }
 
 void ProfileHandler::SignalHandler(int sig, siginfo_t* sinfo, void* ucontext) {

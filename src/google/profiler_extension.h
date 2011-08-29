@@ -43,8 +43,8 @@ public:
   // Resets state to the default
   virtual void Reset() = 0;
 
-  // Gets the signal that should be monitored
-  virtual int GetSignal() { return SIGPROF; }
+  // Gets the signal that should be monitored, if one should be
+  virtual int GetSignal() { return 0; }
 
   // Allow best-effort low-cost suppression of events.
   // The thread stops simply sending events; the timer technique doesn't do anything
