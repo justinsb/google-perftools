@@ -122,6 +122,8 @@ void * ThreadProfileEventSource::TimerThreadMain(void * arg) {
             switch (err) {
             case ESRCH:
               //RAW_LOG(INFO, "Removing finished thread %ld", *it);
+
+              //TODO: Exit when no threads remain??
               it = threads.erase(it);
               continue;
 
