@@ -61,4 +61,8 @@ public:
   }
 };
 
+// Extension support functions
+typedef void (*ProfileRecordCallback)(uint32_t count, void ** backtrace, uint32_t depth);
+typedef ProfileEventSource*(*ProfilerHandlerExtensionFn)(int32_t frequency, const char * extension_spec, ProfileRecordCallback callback);
+
 #endif /* PROFILER_EVENTSOURCE_H_ */

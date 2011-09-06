@@ -51,6 +51,7 @@
 #include "base/logging.h"
 #include "base/spinlock.h"
 #include "maybe_threads.h"
+#include <dlfcn.h>
 #include <google/stacktrace.h>
 #include "profiledata.h"
 
@@ -182,6 +183,10 @@ class ProfileHandler {
 
   // Creates the event source strategy object
   ProfileEventSource * BuildEventSource(const string& event_source_type = string());
+  ProfileEventSource * LoadExtensionEventSource(const string& event_source_type);
+
+  // Allows extensions to fire callbacks
+  static void FireBacktraceCallbacks(uint32 count, void**backtrace, uint32 depth);
 
   // pthread_once_t for one time initialization of ProfileHandler singleton.
   static pthread_once_t once_;
@@ -521,6 +526,65 @@ void ProfileHandler::SignalHandler(int sig, siginfo_t* sinfo, void* ucontext) {
   errno = saved_errno;
 }
 
+
+ProfileEventSource * ProfileHandler::LoadExtensionEventSource(
+    const string& extension_spec) {
+  void * handle = dlopen(0, RTLD_LAZY);
+  if (!handle) {
+    RAW_LOG(WARNING, "Error doing dlopen to load extension %s", dlerror());
+    return 0;
+  }
+
+  string symbol_name = "google_perftools_extension_load_";
+  string args;
+
+  int equals_pos = extension_spec.find('=');
+  if (equals_pos == string::npos) {
+    symbol_name.append(extension_spec);
+  } else {
+    symbol_name.append(extension_spec.substr(0, equals_pos));
+    args.assign(extension_spec.substr(equals_pos + 1));
+  }
+
+  void * symbol = dlsym(handle, symbol_name.c_str());
+  if (!symbol) {
+    RAW_LOG(WARNING, "Could not find extension plugin function: %s", dlerror());
+    return 0;
+  }
+
+  ProfilerHandlerExtensionFn fn = (ProfilerHandlerExtensionFn) symbol;
+  ProfileEventSource * eventSource = fn(frequency_, args.c_str(), FireBacktraceCallbacks);
+  if (!eventSource) {
+    RAW_LOG(WARNING, "Extension plugin returned NULL");
+  }
+
+  if (dlclose(handle)) {
+    RAW_LOG(WARNING, "Error doing dlclose when loading extension: %s",
+        dlerror());
+  }
+
+  return eventSource;
+}
+
+void ProfileHandler::FireBacktraceCallbacks(uint32 count, void**backtrace, uint32 depth) {
+  // Do we need to save errno?
+  int saved_errno = errno;
+  RAW_CHECK(instance_ != NULL, "ProfileHandler is not initialized");
+  {
+    SpinLockHolder sl(&instance_->signal_lock_);
+
+    ++instance_->interrupts_;
+    if (count != 0) {
+      for (CallbackIterator it = instance_->callbacks_.begin();
+           it != instance_->callbacks_.end();
+           ++it) {
+        (*it)->callback(count, backtrace, depth, (*it)->callback_arg);
+      }
+    }
+  }
+  errno = saved_errno;
+}
+
 #include "profile-eventsource-timerthread.cc"
 
 ProfileEventSource * ProfileHandler::BuildEventSource(const string& event_source_type) {
@@ -552,6 +616,13 @@ ProfileEventSource * ProfileHandler::BuildEventSource(const string& event_source
   } else if (use_event_source_type == "thread-wallclock") {
     // Wall clock profiling
     return new ThreadProfileEventSource(frequency_);
+  } else if (0 == use_event_source_type.compare(0, 10, "extension-")) {
+    // Load an extension (still needs to be linked, but need not be in the perftools project)
+    ProfileEventSource * eventSource = LoadExtensionEventSource(use_event_source_type.substr(10));
+    if (!eventSource) {
+      RAW_LOG(FATAL, "Could not load custom event source: %s", use_event_source_type.c_str());
+    }
+    return eventSource;
   } else {
     // Default - CPU focused profiling
     return new TimerProfileEventSource(frequency_, ITIMER_PROF);
