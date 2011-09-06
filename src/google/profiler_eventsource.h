@@ -1,5 +1,5 @@
-#ifndef PROFILER_EXTENSION_H_
-#define PROFILER_EXTENSION_H_
+#ifndef PROFILER_EVENTSOURCE_H_
+#define PROFILER_EVENTSOURCE_H_
 
 #include <signal.h>
 #include <stdint.h>
@@ -51,18 +51,6 @@ public:
   // Best-effort is OK because the caller is enabling/disabling the signal handler as well
   virtual void EnableEvents() { }
   virtual void DisableEvents() { }
-
-  // Gets the number of ticks that have elapsed since the last call
-  // When using wall-clock profiling, multiple signals might be sent during a syscall,
-  // but the signal handler is only called once.
-  // The tick count lets us know how many ticks took place.
-  virtual uint32_t GetTicksSinceLastCall() {
-    return 1;
-  }
 };
 
-// Extension support functions
-typedef void (*ProfileRecordCallback)(uint32_t count, void ** backtrace, uint32_t depth);
-typedef ProfileEventSource*(*ProfilerHandlerExtensionFn)(int32_t frequency, const char * extension_spec, ProfileRecordCallback callback);
-
-#endif /* PROFILER_EXTENSION_H_ */
+#endif /* PROFILER_EVENTSOURCE_H_ */

@@ -34,9 +34,8 @@
 // Implements management of profile timers and the corresponding signal handler.
 
 #include "config.h"
-#include "getpc.h"      // should be first to get the _GNU_SOURCE dfn
 #include "profile-handler.h"
-#include "google/profiler_extension.h"
+#include "google/profiler_eventsource.h"
 
 #if !(defined(__CYGWIN__) || defined(__CYGWIN32__)) && !defined(__native_client__)
 
@@ -51,9 +50,6 @@
 #include "base/logging.h"
 #include "base/spinlock.h"
 #include "maybe_threads.h"
-#include <dlfcn.h>
-#include <google/stacktrace.h>
-#include "profiledata.h"
 
 using std::list;
 using std::string;
@@ -183,7 +179,6 @@ class ProfileHandler {
 
   // Creates the event source strategy object
   ProfileEventSource * BuildEventSource(const string& event_source_type = string());
-  ProfileEventSource * LoadExtensionEventSource(const string& event_source_type);
 
   // pthread_once_t for one time initialization of ProfileHandler singleton.
   static pthread_once_t once_;
@@ -235,8 +230,6 @@ class ProfileHandler {
   // SIGPROF/SIGALRM handler. Iterate over and call all the registered callbacks.
   static void SignalHandler(int sig, siginfo_t* sinfo, void* ucontext);
 
-  static void FireBacktraceCallbacks(uint32 count, void**backtrace, uint32 depth);
-
   DISALLOW_COPY_AND_ASSIGN(ProfileHandler);
 };
 
@@ -272,7 +265,8 @@ ProfileHandler* ProfileHandler::Instance() {
 }
 
 ProfileHandler::ProfileHandler()
-    : interrupts_(0),
+    : event_source_(0),
+      interrupts_(0),
       callback_count_(0) {
 
   SpinLockHolder cl(&control_lock_);
@@ -493,136 +487,30 @@ void ProfileHandler::SignalHandler(int sig, siginfo_t* sinfo, void* ucontext) {
   RAW_CHECK(instance_ != NULL, "ProfileHandler is not initialized");
   {
     SpinLockHolder sl(&instance_->signal_lock_);
-    uint32_t ticks = instance_->event_source_->GetTicksSinceLastCall();
-    bool has_callbacks = !instance_->callbacks_.empty();
-
     ++instance_->interrupts_;
-    if (has_callbacks && ticks != 0) {
-      void* stack[ProfileData::kMaxStackDepth];
-
-      // The top-most active routine doesn't show up as a normal
-      // frame, but as the "pc" value in the signal handler context.
-      stack[0] = GetPC(*reinterpret_cast<ucontext_t*>(ucontext));
-
-      // We skip the top two stack trace entries (this function and one
-      // signal handler frame) since they are artifacts of profiling and
-      // should not be measured.  Other profiling related frames may be
-      // removed by "pprof" at analysis time.  Instead of skipping the top
-      // frames, we could skip nothing, but that would increase the
-      // profile size unnecessarily.
-      uint32 depth = GetStackTraceWithContext(stack + 1, arraysize(stack) - 1,
-                                       2, ucontext);
-      depth++;  // To account for pc value in stack[0];
-
-      for (CallbackIterator it = instance_->callbacks_.begin();
-           it != instance_->callbacks_.end();
-           ++it) {
-        (*it)->callback(ticks, stack, depth, (*it)->callback_arg);
-      }
+    for (CallbackIterator it = instance_->callbacks_.begin();
+         it != instance_->callbacks_.end();
+         ++it) {
+      (*it)->callback(sig, sinfo, ucontext, (*it)->callback_arg);
     }
   }
   errno = saved_errno;
-}
-
-void ProfileHandler::FireBacktraceCallbacks(uint32 count, void**backtrace, uint32 depth) {
-  // Do we need to save errno?
-  int saved_errno = errno;
-  RAW_CHECK(instance_ != NULL, "ProfileHandler is not initialized");
-  {
-    SpinLockHolder sl(&instance_->signal_lock_);
-
-    ++instance_->interrupts_;
-    if (count != 0) {
-      for (CallbackIterator it = instance_->callbacks_.begin();
-           it != instance_->callbacks_.end();
-           ++it) {
-        (*it)->callback(count, backtrace, depth, (*it)->callback_arg);
-      }
-    }
-  }
-  errno = saved_errno;
-}
-
-
-#include "profile-eventsource-timerthread.cc"
-
-ProfileEventSource * ProfileHandler::LoadExtensionEventSource(
-    const string& extension_spec) {
-  void * handle = dlopen(0, RTLD_LAZY);
-  if (!handle) {
-    RAW_LOG(WARNING, "Error doing dlopen to load extension %s", dlerror());
-    return 0;
-  }
-
-  string symbol_name = "google_perftools_extension_load_";
-  string args;
-
-  int equals_pos = extension_spec.find('=');
-  if (equals_pos == string::npos) {
-    symbol_name.append(extension_spec);
-  } else {
-    symbol_name.append(extension_spec.substr(0, equals_pos));
-    args.assign(extension_spec.substr(equals_pos + 1));
-  }
-
-  void * symbol = dlsym(handle, symbol_name.c_str());
-  if (!symbol) {
-    RAW_LOG(WARNING, "Could not find extension plugin function: %s", dlerror());
-    return 0;
-  }
-
-  ProfilerHandlerExtensionFn fn = (ProfilerHandlerExtensionFn) symbol;
-
-  ProfileEventSource * eventSource = fn(frequency_, args.c_str(),
-      FireBacktraceCallbacks);
-  if (!eventSource) {
-    RAW_LOG(WARNING, "Extension plugin returned NULL");
-  }
-
-  if (dlclose(handle)) {
-    RAW_LOG(WARNING, "Error doing dlclose when loading extension: %s",
-        dlerror());
-  }
-
-  return eventSource;
 }
 
 ProfileEventSource * ProfileHandler::BuildEventSource(const string& event_source_type) {
-  // Precedence of settings:
-  // 1) Function argument (e.g. if passed in a web request)
-  // 2) CPUPROFILE_EVENT environment variable
-  // 3) "Legacy" environment variables (CPUPROFILE_REALTIME)
-  //
-  // We always default to traditional CPU profiling.
-  // TODO: accept something like "none", so it's easier to turn off profiling from the env
-
   string use_event_source_type = event_source_type;
   if (use_event_source_type.empty()) {
-    if (getenv("CPUPROFILE_EVENT")) {
-      use_event_source_type = getenv("CPUPROFILE_EVENT");
+    if (getenv("CPUPROFILE_REALTIME")) {
+      // Use the realtime timer if any value is set for CPUPROFILE_REALTIME (even empty)
+      use_event_source_type = "timer-realtime";
     } else {
-      if (getenv("CPUPROFILE_REALTIME")) {
-        // Use the realtime timer if any value is set for CPUPROFILE_REALTIME (even empty)
-        use_event_source_type = "timer-realtime";
-      } else {
-        use_event_source_type = "timer-cpu";
-      }
+      use_event_source_type = "timer-cpu";
     }
   }
 
   if (use_event_source_type == "timer-realtime") {
     // Profiling using the "real-time" profiler - problematic with multi-threaded code
     return new TimerProfileEventSource(frequency_, ITIMER_REAL);
-  } else if (use_event_source_type == "thread-wallclock") {
-    // Wall clock profiling
-    return new ThreadProfileEventSource(frequency_);
-  } else if (0 == use_event_source_type.compare(0, 10, "extension-")) {
-    // Load an extension (still needs to be linked, but need not be in the perftools project)
-    ProfileEventSource * eventSource = LoadExtensionEventSource(use_event_source_type.substr(10));
-    if (!eventSource) {
-      RAW_LOG(FATAL, "Could not load custom event source: %s", use_event_source_type.c_str());
-    }
-    return eventSource;
   } else {
     // Default - CPU focused profiling
     return new TimerProfileEventSource(frequency_, ITIMER_PROF);

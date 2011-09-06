@@ -171,10 +171,10 @@ class NullThread : public Thread {
 };
 
 // Signal handler which tracks the profile timer ticks.
-static void TickCounter(uint32_t count, void**backtrace, uint32_t backtrace_size,
+static void TickCounter(int sig, siginfo_t* sig_info, void *vuc,
                         void* tick_counter) {
   int* counter = static_cast<int*>(tick_counter);
-  (*counter) += count;
+  ++(*counter);
 }
 
 // This class tests the profile-handler.h interface.

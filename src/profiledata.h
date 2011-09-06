@@ -129,7 +129,7 @@ class ProfileData {
   //
   // This function is safe to call from asynchronous signals (but is
   // not re-entrant).
-  void Add(uint32_t count, int depth, const void* const* stack);
+  void Add(int depth, const void* const* stack);
 
   // If data collection is enabled, write the data to disk (and leave
   // the collector enabled).

@@ -90,8 +90,8 @@ struct ProfileHandlerToken;
  *   - Release lock.
  *   and the callback code gets a lockless, read-write access to the data.
  */
-typedef void (*ProfileHandlerCallback)(uint32_t count, void* *backtrace, uint32_t depth,
-                                       void* callback_arg);
+typedef void (*ProfileHandlerCallback)(int sig, siginfo_t* sig_info,
+                                       void* ucontext, void* callback_arg);
 
 /*
  * Registers a new thread with profile handler and should be called only once
