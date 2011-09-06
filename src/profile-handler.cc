@@ -34,6 +34,7 @@
 // Implements management of profile timers and the corresponding signal handler.
 
 #include "config.h"
+#include "getpc.h"      // should be first to get the _GNU_SOURCE dfn
 #include "profile-handler.h"
 #include "google/profiler_eventsource.h"
 
@@ -50,6 +51,8 @@
 #include "base/logging.h"
 #include "base/spinlock.h"
 #include "maybe_threads.h"
+#include <google/stacktrace.h>
+#include "profiledata.h"
 
 using std::list;
 using std::string;
@@ -487,11 +490,32 @@ void ProfileHandler::SignalHandler(int sig, siginfo_t* sinfo, void* ucontext) {
   RAW_CHECK(instance_ != NULL, "ProfileHandler is not initialized");
   {
     SpinLockHolder sl(&instance_->signal_lock_);
+    uint32_t ticks = instance_->event_source_->GetTicksSinceLastCall();
+    bool has_callbacks = !instance_->callbacks_.empty();
+
     ++instance_->interrupts_;
-    for (CallbackIterator it = instance_->callbacks_.begin();
-         it != instance_->callbacks_.end();
-         ++it) {
-      (*it)->callback(sig, sinfo, ucontext, (*it)->callback_arg);
+    if (has_callbacks && ticks != 0) {
+      void* stack[ProfileData::kMaxStackDepth];
+
+      // The top-most active routine doesn't show up as a normal
+      // frame, but as the "pc" value in the signal handler context.
+      stack[0] = GetPC(*reinterpret_cast<ucontext_t*>(ucontext));
+
+      // We skip the top two stack trace entries (this function and one
+      // signal handler frame) since they are artifacts of profiling and
+      // should not be measured.  Other profiling related frames may be
+      // removed by "pprof" at analysis time.  Instead of skipping the top
+      // frames, we could skip nothing, but that would increase the
+      // profile size unnecessarily.
+      uint32 depth = GetStackTraceWithContext(stack + 1, arraysize(stack) - 1,
+                                       2, ucontext);
+      depth++;  // To account for pc value in stack[0];
+
+      for (CallbackIterator it = instance_->callbacks_.begin();
+           it != instance_->callbacks_.end();
+           ++it) {
+        (*it)->callback(ticks, stack, depth, (*it)->callback_arg);
+      }
     }
   }
   errno = saved_errno;

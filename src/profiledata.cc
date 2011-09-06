@@ -257,7 +257,7 @@ void ProfileData::FlushTable() {
   FlushEvicted();
 }
 
-void ProfileData::Add(int depth, const void* const* stack) {
+void ProfileData::Add(uint32_t count, int depth, const void* const* stack) {
   if (!enabled()) {
     return;
   }
@@ -273,7 +273,7 @@ void ProfileData::Add(int depth, const void* const* stack) {
     h += (slot * 31) + (slot * 7) + (slot * 3);
   }
 
-  count_++;
+  count_ += count;
 
   // See if table already has an entry for this trace
   bool done = false;
@@ -289,7 +289,7 @@ void ProfileData::Add(int depth, const void* const* stack) {
         }
       }
       if (match) {
-        e->count++;
+        e->count += count;
         done = true;
         break;
       }
@@ -311,7 +311,7 @@ void ProfileData::Add(int depth, const void* const* stack) {
 
     // Use the newly evicted entry
     e->depth = depth;
-    e->count = 1;
+    e->count = count;
     for (int i = 0; i < depth; i++) {
       e->stack[i] = reinterpret_cast<Slot>(stack[i]);
     }

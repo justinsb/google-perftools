@@ -51,6 +51,14 @@ public:
   // Best-effort is OK because the caller is enabling/disabling the signal handler as well
   virtual void EnableEvents() { }
   virtual void DisableEvents() { }
+
+  // Gets the number of ticks that have elapsed since the last call
+  // When using wall-clock profiling, multiple signals might be sent during a syscall,
+  // but the signal handler is only called once.
+  // The tick count lets us know how many ticks took place.
+  virtual uint32_t GetTicksSinceLastCall() {
+    return 1;
+  }
 };
 
 #endif /* PROFILER_EVENTSOURCE_H_ */

@@ -122,7 +122,7 @@ class CpuProfiler {
   void DisableHandler();
 
   // Signal handler that records the interrupted pc in the profile data.
-  static void prof_handler(int sig, siginfo_t*, void* signal_ucontext,
+  static void prof_handler(uint32_t count, void* *backtrace, uint32_t depth,
                            void* cpu_profiler);
 };
 
@@ -258,29 +258,13 @@ void CpuProfiler::DisableHandler() {
 // access the data touched by prof_handler() disable this signal handler before
 // accessing the data and therefore cannot execute concurrently with
 // prof_handler().
-void CpuProfiler::prof_handler(int sig, siginfo_t*, void* signal_ucontext,
+void CpuProfiler::prof_handler(uint32_t count, void* *backtrace, uint32_t depth,
                                void* cpu_profiler) {
   CpuProfiler* instance = static_cast<CpuProfiler*>(cpu_profiler);
 
   if (instance->filter_ == NULL ||
       (*instance->filter_)(instance->filter_arg_)) {
-    void* stack[ProfileData::kMaxStackDepth];
-
-    // The top-most active routine doesn't show up as a normal
-    // frame, but as the "pc" value in the signal handler context.
-    stack[0] = GetPC(*reinterpret_cast<ucontext_t*>(signal_ucontext));
-
-    // We skip the top two stack trace entries (this function and one
-    // signal handler frame) since they are artifacts of profiling and
-    // should not be measured.  Other profiling related frames may be
-    // removed by "pprof" at analysis time.  Instead of skipping the top
-    // frames, we could skip nothing, but that would increase the
-    // profile size unnecessarily.
-    int depth = GetStackTraceWithContext(stack + 1, arraysize(stack) - 1,
-                                         2, signal_ucontext);
-    depth++;  // To account for pc value in stack[0];
-
-    instance->collector_.Add(depth, stack);
+    instance->collector_.Add(count, depth, backtrace);
   }
 }
 
