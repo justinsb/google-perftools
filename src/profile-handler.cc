@@ -521,20 +521,37 @@ void ProfileHandler::SignalHandler(int sig, siginfo_t* sinfo, void* ucontext) {
   errno = saved_errno;
 }
 
+#include "profile-eventsource-timerthread.cc"
+
 ProfileEventSource * ProfileHandler::BuildEventSource(const string& event_source_type) {
+  // Precedence of settings:
+  // 1) Function argument (e.g. if passed in a web request)
+  // 2) CPUPROFILE_EVENT environment variable
+  // 3) "Legacy" environment variables (CPUPROFILE_REALTIME)
+  //
+  // We always default to traditional CPU profiling.
+  // TODO: accept something like "none", so it's easier to turn off profiling from the env
+
   string use_event_source_type = event_source_type;
   if (use_event_source_type.empty()) {
-    if (getenv("CPUPROFILE_REALTIME")) {
-      // Use the realtime timer if any value is set for CPUPROFILE_REALTIME (even empty)
-      use_event_source_type = "timer-realtime";
+    if (getenv("CPUPROFILE_EVENT")) {
+      use_event_source_type = getenv("CPUPROFILE_EVENT");
     } else {
-      use_event_source_type = "timer-cpu";
+      if (getenv("CPUPROFILE_REALTIME")) {
+        // Use the realtime timer if any value is set for CPUPROFILE_REALTIME (even empty)
+        use_event_source_type = "timer-realtime";
+      } else {
+        use_event_source_type = "timer-cpu";
+      }
     }
   }
 
   if (use_event_source_type == "timer-realtime") {
     // Profiling using the "real-time" profiler - problematic with multi-threaded code
     return new TimerProfileEventSource(frequency_, ITIMER_REAL);
+  } else if (use_event_source_type == "thread-wallclock") {
+    // Wall clock profiling
+    return new ThreadProfileEventSource(frequency_);
   } else {
     // Default - CPU focused profiling
     return new TimerProfileEventSource(frequency_, ITIMER_PROF);
