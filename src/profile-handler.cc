@@ -616,7 +616,7 @@ ProfileEventSource * ProfileHandler::BuildEventSource(const string& event_source
   } else if (use_event_source_type == "thread-wallclock") {
     // Wall clock profiling
     return new ThreadProfileEventSource(frequency_);
-  } else if (0 == use_event_source_type.compare(0, 10, "extension-")) {
+  } else if (use_event_source_type.compare(0, 10, "extension-") == 0) {
     // Load an extension (still needs to be linked, but need not be in the perftools project)
     ProfileEventSource * eventSource = LoadExtensionEventSource(use_event_source_type.substr(10));
     if (!eventSource) {
