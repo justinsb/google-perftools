@@ -2,7 +2,7 @@
 #define PROFILER_EVENTSOURCE_H_
 
 /**
- * ProfileEventSource is the base class for strategies around different CPU
+ * ProfileEventSource is the base class for strategies around different
  * profiling sampling techniques.
  *
  * To provide a custom sampling technique for the CPU profiler, one can
@@ -11,49 +11,51 @@
  *
  * Currently these strategies exist:
  *   TimerProfileEventSource:
- *     Sample using setitimer, based on regular CPU clock intervals or
+ *     Sample using setitimer, i.e. sample on regular CPU-clock intervals or
  *     wall-clock intervals
  *
- * Currently all events are raised through signals; in future we may call the
- * registered callbacks directly.
+ * Currently an event must raise a signal when it fires; the ProfileHandler
+ * then calls each of the registered callbacks.  In future we may remove the
+ * requirement for an intermediate signal.
  *
- * These strategies should only be called by ProfileHandler; calling methods
- * directly is likely to cause unexpected behaviour.
+ * ProfileEventSource objects should only be called by ProfileHandler;
+ * calling methods directly can cause unexpected behaviour.
  *
  *
  * Background:
  *
  * The CPU profiler is a sampling profiler; "sampling" because instead of trying
- * to record everything as it happens, instead we periodically take "samples"
- * that represent the state of the program.  Statistically, these samples will
- * provide a good approximation to the full behaviour of the program.  Normally
- * these samples are stack traces of the program at a particular moment in time.
+ * to record everything that happens, instead we periodically take "samples"
+ * that represent the state of the program.  We expect that statistically these
+ * samples will approximate the full behaviour of the program.  Normally these
+ * samples are stack traces of the program at a particular moment in time.
  *
  * We can consider the behaviour of a program in different ways.  Often we want
  * to know where the program is spending most of its CPU time; to measure this
- * we sample based on regular intervals of CPU time; the samples will then
+ * we sample based on regular intervals of CPU time; the samples should then
  * converge to an accurate representation of CPU time usage.  The "setitimer"
  * syscall gives us this behaviour, and this is the traditional way in which
  * google-perftools CPU profiler has been used, as implemented in
  * TimerProfileEventSource.
  *
- * However, in the case of an I/O bound program, the CPU time often isn't as
- * important as where we're waiting on I/O.  In this case, we often want to
- * know where the program is spending its wall-clock time, rather than CPU time.
- * So we want to sample based on regular wall-clock intervals.
+ * However, in the case of an I/O bound program, knowing where we're spending
+ * CPU time often isn't as important as knowing where we're waiting on I/O.
+ * In this case, we usually want to know where the program is spending its
+ * wall-clock time, rather than CPU time. So we want to sample based on regular
+ * wall-clock intervals.
  *
  * Generalizing, there are a large number of ways to profile a program.
- * Modern CPUs include a number of hardware performance metrics (cache misses,
+ * Modern CPUs include a number of hardware performance events (cache misses,
  * page faults, branches etc); the linux "Perf" system exposes a number of OS
- * events.  By sampling on regular intervals of these events we can get an idea
- * of which code is producing these events, in the same way that CPU
- * profiling shows us which code is consuming the most CPU.
+ * events (run "perf list" to see a list).  By sampling on regular intervals of
+ * these events we can get an idea of which code is producing these events, just
+ * as CPU profiling shows us which code is consuming the most CPU.
  *
- * User-code might even want to sample based on its own events (e.g. mallocs,
+ * User-code might also want to sample based on its own events (e.g. mallocs,
  * hashtable rehashes, RPC calls, any expensive function or unexpected event.)
  *
- * Because there are a large number of these different ways on which to sample,
- * we use a strategy pattern to separate out the sampling strategy (the "when")
+ * Because there are a large number of different ways in which to sample,
+ * we use a strategy pattern to separate out the sampling event (the "when")
  * from the sampling action (the "what").  The ProfileHandler does the "what"
  * (currently recording stack traces), an instance of ProfileEventSource says
  * "when" to do it.
