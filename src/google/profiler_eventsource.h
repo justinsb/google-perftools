@@ -1,54 +1,108 @@
 #ifndef PROFILER_EVENTSOURCE_H_
 #define PROFILER_EVENTSOURCE_H_
 
+/**
+ * ProfileEventSource is the base class for strategies around different CPU
+ * profiling sampling techniques.
+ *
+ * To provide a custom sampling technique for the CPU profiler, one can
+ * implement the ProfileEventSource interface and then make sure it is created
+ * in ProfileHandler::BuildEventSource.
+ *
+ * Currently these strategies exist:
+ *   TimerProfileEventSource:
+ *     Sample using setitimer, based on regular CPU clock intervals or
+ *     wall-clock intervals
+ *
+ * Currently all events are raised through signals; in future we may call the
+ * registered callbacks directly.
+ *
+ * These strategies should only be called by ProfileHandler; calling methods
+ * directly is likely to cause unexpected behaviour.
+ *
+ *
+ * Background:
+ *
+ * The CPU profiler is a sampling profiler; "sampling" because instead of trying
+ * to record everything as it happens, instead we periodically take "samples"
+ * that represent the state of the program.  Statistically, these samples will
+ * provide a good approximation to the full behaviour of the program.  Normally
+ * these samples are stack traces of the program at a particular moment in time.
+ *
+ * We can consider the behaviour of a program in different ways.  Often we want
+ * to know where the program is spending most of its CPU time; to measure this
+ * we sample based on regular intervals of CPU time; the samples will then
+ * converge to an accurate representation of CPU time usage.  The "setitimer"
+ * syscall gives us this behaviour, and this is the traditional way in which
+ * google-perftools CPU profiler has been used, as implemented in
+ * TimerProfileEventSource.
+ *
+ * However, in the case of an I/O bound program, the CPU time often isn't as
+ * important as where we're waiting on I/O.  In this case, we often want to
+ * know where the program is spending its wall-clock time, rather than CPU time.
+ * So we want to sample based on regular wall-clock intervals.
+ *
+ * Generalizing, there are a large number of ways to profile a program.
+ * Modern CPUs include a number of hardware performance metrics (cache misses,
+ * page faults, branches etc); the linux "Perf" system exposes a number of OS
+ * events.  By sampling on regular intervals of these events we can get an idea
+ * of which code is producing these events, in the same way that CPU
+ * profiling shows us which code is consuming the most CPU.
+ *
+ * User-code might even want to sample based on its own events (e.g. mallocs,
+ * hashtable rehashes, RPC calls, any expensive function or unexpected event.)
+ *
+ * Because there are a large number of these different ways on which to sample,
+ * we use a strategy pattern to separate out the sampling strategy (the "when")
+ * from the sampling action (the "what").  The ProfileHandler does the "what"
+ * (currently recording stack traces), an instance of ProfileEventSource says
+ * "when" to do it.
+ */
 #include <signal.h>
 #include <stdint.h>
 
-// This header should be included to declare a custom profiler event source
-// Currently this can only be done from C++
-
 class ProfileHandler;
 
-// The ProfileEventSource is a strategy pattern for producing events we want to correlate to code
-// Currently: setitimer events for CPU profiling, interval events for wall-clock profiling
-// We could in future have a strategy that uses hardware performance events (e.g. cache misses)
-// It might even be possible to have usercode generated events (e.g. hashtable rehashes)
 class ProfileEventSource {
 public:
-  ProfileEventSource() {}
+  ProfileEventSource() { }
 
-  virtual ~ProfileEventSource() {
-  }
+  virtual ~ProfileEventSource() { }
 
-  // Registers the current thread with the profile handler. On systems which
-  // have a separate interval timer for each thread, this function starts the
-  // timer for the current thread.
-  //
-  // The function also attempts to determine whether or not timers are shared by
-  // all threads in the process.  (With LinuxThreads, and with NPTL on some
-  // Linux kernel versions, each thread has separate timers.)
-  //
-  // Prior to determining whether timers are shared, this function will
-  // unconditionally start the timer.  However, if this function determines
-  // that timers are shared, then it will stop the timer if no callbacks are
-  // currently registered.
+  // Registers the current thread with the event source.
+  // Any per-thread actions can be done here; it's also a good place for
+  // any one-off initialization.
+  // Called automatically at initialization by ProfileHandlerInitializer,
+  // or explicitly by a call to ProfileHandlerRegisterThread.
   virtual void RegisterThread(int callback_count) = 0;
 
-  // Called after a callback is registered / unregistered.
-  // The underlying event source could be stopped / started
-  // (but might not be, e.g. if we're don't yet know if timers are shared)
+  // Called after a sampler callback is registered / unregistered.
+  // If the event source is high-impact, start or stop it here based on the
+  //  new callback count.
   virtual void RegisteredCallback(int new_callback_count) = 0;
   virtual void UnregisteredCallback(int new_callback_count) = 0;
 
-  // Resets state to the default
+  // Resets any internal state to the initial state;
+  // Called when ProfileHandlerReset is called.
+  // e.g. Stop a timer if you started one
   virtual void Reset() = 0;
 
-  // Gets the signal that should be monitored, if one should be
-  virtual int GetSignal() { return 0; }
+  // Returns the signal that should be monitored for our events.
+  // Currently all profiling events are raised through signals.
+  // Return NO_SIGNAL if no signal should be monitored.
+  static const int NO_SIGNAL = 0;
+  virtual int GetSignal() { return NO_SIGNAL; }
 
-  // Allow best-effort low-cost suppression of events.
-  // The thread stops simply sending events; the timer technique doesn't do anything
-  // Best-effort is OK because the caller is enabling/disabling the signal handler as well
+  // To avoid complex threading issues, the profiler suppresses events when
+  // its internal state is changing (e.g. when adding or removing callbacks)
+  // After a call to EnableEvents, no more events should be raised until a
+  // call to DisableEvents.
+  // The profiler also enables/disables its signal handler, so an event source
+  // does not have to support these functions.  These functions should normally
+  // have an inexpensive implementation (suppress events rather than disable
+  // the event source), because these functions are called whenever a callback
+  // is registered.  Disabling the event source should instead be done when
+  // the last callback is unregistered (see UnregisteredCallback above)
   virtual void EnableEvents() { }
   virtual void DisableEvents() { }
 };
