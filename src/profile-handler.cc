@@ -141,14 +141,14 @@ private:
     TIMERS_SHARED,
     // Timers are separate in each thread.
     TIMERS_SEPARATE
-  } timer_sharing_ GUARDED_BY(control_lock_);
+  } timer_sharing_;
 };
 
 // This class manages the profile event source and associated signal handler.
 // This is a a singleton.
 class ProfileHandler {
  public:
-  // Registers the current thread with the profile handler
+  // Registers the current thread with the profile handler.
   void RegisterThread();
 
   // Registers a callback routine to receive profile events. The returned
@@ -187,10 +187,10 @@ class ProfileHandler {
   static ProfileHandler* instance_;
 
   // Our event source
-  ProfileEventSource* event_source_;
+  ProfileEventSource* event_source_ GUARDED_BY(control_lock_);
 
   // Creates the event source strategy object
-  ProfileEventSource * BuildEventSource(const string& event_source_type = string());
+  ProfileEventSource * BuildEventSource(const string& event_source_type);
 
   // pthread_once_t for one time initialization of ProfileHandler singleton.
   static pthread_once_t once_;
@@ -294,7 +294,7 @@ ProfileHandler::ProfileHandler()
     frequency_ = kDefaultFrequency;
   }
 
-  event_source_ = BuildEventSource();
+  event_source_ = BuildEventSource("");
 
   // Ignore signals until we decide to turn profiling on.  (Paranoia;
   // should already be ignored.)
