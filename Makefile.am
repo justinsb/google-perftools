@@ -1140,7 +1140,7 @@ S_CPU_PROFILER_INCLUDES = src/profiledata.h \
                           $(LOGGING_INCLUDES)
 SG_CPU_PROFILER_INCLUDES = src/google/profiler.h \
                            src/google/stacktrace.h \
-                           src/google/profiler_extension.h
+                           src/google/profiler_eventsource.h
 
 CPU_PROFILER_INCLUDES = $(S_CPU_PROFILER_INCLUDES) $(SG_CPU_PROFILER_INCLUDES)
 googleinclude_HEADERS += $(SG_CPU_PROFILER_INCLUDES)
