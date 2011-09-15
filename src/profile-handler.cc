@@ -80,14 +80,37 @@ public:
     timer_sharing_(TIMERS_UNTOUCHED) {
   }
 
+  // Registers the current thread with the event source.
+  // On systems which have a separate interval timer for each thread, this
+  // function starts the timer for the current thread.
+  //
+  // The function also attempts to determine whether or not timers are shared by
+  // all threads in the process.  (With LinuxThreads, and with NPTL on some
+  // Linux kernel versions, each thread has separate timers.)
+  //
+  // Prior to determining whether timers are shared, this function will
+  // unconditionally start the timer.  However, if this function determines
+  // that timers are shared, then it will stop the timer if no callbacks are
+  // currently registered.
   void RegisterThread(int callback_count);
+
+  // Resets internal state:
+  // Stops the timer if shared, clears the timer_sharing_ state.
   void Reset();
 
+  // Return the signal that we fire on every timer event.
   int GetSignal() {
     return (timer_type_ == ITIMER_PROF ? SIGPROF : SIGALRM);
   }
 
+  // Called when a callback routine is registered.
+  // Registration of the first callback enables the SIGPROF handler
+  // (or SIGALRM if using ITIMER_REAL).
   void RegisteredCallback(int new_callback_count);
+
+  // Called when a callback routine is unregistered.
+  // Unregistering of the last callback disables the SIGPROF handler
+  // (or SIGALRM if using ITIMER_REAL).
   void UnregisteredCallback(int new_callback_count);
 
 private:
@@ -122,42 +145,31 @@ private:
     TIMERS_SHARED,
     // Timers are separate in each thread.
     TIMERS_SEPARATE
-  } timer_sharing_ GUARDED_BY(control_lock_);
+  } timer_sharing_;
 };
 
-// This class manages profile timers and associated signal handler. This is a
-// a singleton.
+// This class manages the profile event source and associated signal handler.
+// This is a a singleton.
 class ProfileHandler {
  public:
-  // Registers the current thread with the profile handler. On systems which
-  // have a separate interval timer for each thread, this function starts the
-  // timer for the current thread.
-  //
-  // The function also attempts to determine whether or not timers are shared by
-  // all threads in the process.  (With LinuxThreads, and with NPTL on some
-  // Linux kernel versions, each thread has separate timers.)
-  //
-  // Prior to determining whether timers are shared, this function will
-  // unconditionally start the timer.  However, if this function determines
-  // that timers are shared, then it will stop the timer if no callbacks are
-  // currently registered.
+  // Registers the current thread with the profile handler.
   void RegisterThread();
 
-  // Registers a callback routine to receive profile timer ticks. The returned
+  // Registers a callback routine to receive profile events. The returned
   // token is to be used when unregistering this callback and must not be
   // deleted by the caller. Registration of the first callback enables the
-  // SIGPROF handler (or SIGALRM if using ITIMER_REAL).
+  // event source.
   ProfileHandlerToken* RegisterCallback(ProfileHandlerCallback callback,
                                         void* callback_arg);
 
   // Unregisters a previously registered callback. Expects the token returned
   // by the corresponding RegisterCallback routine. Unregistering the last
-  // callback disables the SIGPROF handler (or SIGALRM if using ITIMER_REAL).
+  // callback disables the event source.
   void UnregisterCallback(ProfileHandlerToken* token)
       NO_THREAD_SAFETY_ANALYSIS;
 
-  // Unregisters all the callbacks, stops the timer if shared, disables the
-  // SIGPROF (or SIGALRM) handler and clears the timer_sharing_ state.
+  // Unregisters all the callbacks, disables the event signal handler,
+  // resets the event source
   void Reset();
 
   // Gets the current state of profile handler.
@@ -179,7 +191,7 @@ class ProfileHandler {
   static ProfileHandler* instance_;
 
   // Our event source
-  ProfileEventSource* event_source_;
+  ProfileEventSource* event_source_ GUARDED_BY(control_lock_);
 
   // Creates the event source strategy object
   ProfileEventSource * BuildEventSource(const string& event_source_type = string());
@@ -194,10 +206,10 @@ class ProfileHandler {
   // Initializes the ProfileHandler singleton via GoogleOnceInit.
   static void Init();
 
-  // The number of SIGPROF (or SIGALRM for ITIMER_REAL) interrupts received.
+  // The number of events received.
   int64 interrupts_ GUARDED_BY(signal_lock_);
 
-  // SIGPROF/SIGALRM interrupt frequency, read-only after construction.
+  // Desired event frequency, read-only after construction.
   int32 frequency_;
 
   // Counts the number of callbacks registered.
@@ -216,26 +228,26 @@ class ProfileHandler {
   // small. Currently, the cpu profiler (base/profiler) and thread module
   // (base/thread.h) are the only two components registering callbacks.
   // Following are the locking requirements for callbacks_:
-  // For read-write access outside the SIGPROF handler:
+  // For read-write access outside the signal handler:
   //  - Acquire control_lock_
-  //  - Disable SIGPROF handler.
+  //  - Disable signal handler.
   //  - Acquire signal_lock_
-  // For read-only access in the context of SIGPROF handler
-  // (Read-write access is *not allowed* in the SIGPROF handler)
+  // For read-only access in the context of signal handler
+  // (Read-write access is *not allowed* in the signal handler)
   //  - Acquire signal_lock_
-  // For read-only access outside SIGPROF handler:
+  // For read-only access outside signal handler:
   //  - Acquire control_lock_
   typedef list<ProfileHandlerToken*> CallbackList;
   typedef CallbackList::iterator CallbackIterator;
   CallbackList callbacks_ GUARDED_BY(signal_lock_);
 
-  // Sets the timer interrupt signal handler.
+  // Sets the event signal handler.
   void EnableHandler() EXCLUSIVE_LOCKS_REQUIRED(control_lock_);
 
-  // Disables (ignores) the timer interrupt signal.
+  // Disables (ignores) the event signal handler.
   void DisableHandler() EXCLUSIVE_LOCKS_REQUIRED(control_lock_);
 
-  // SIGPROF/SIGALRM handler. Iterate over and call all the registered callbacks.
+  // Event signal handler. Iterate over and call all the registered callbacks.
   static void SignalHandler(int sig, siginfo_t* sinfo, void* ucontext);
 
   DISALLOW_COPY_AND_ASSIGN(ProfileHandler);
@@ -290,7 +302,7 @@ ProfileHandler::ProfileHandler()
     frequency_ = kDefaultFrequency;
   }
 
-  event_source_ = BuildEventSource();
+  event_source_ = BuildEventSource("");
 
   // Ignore signals until we decide to turn profiling on.  (Paranoia;
   // should already be ignored.)
@@ -467,7 +479,7 @@ void ProfileHandler::EnableHandler() {
 
   const int signal_number = event_source_->GetSignal();
 
-  if (signal_number) {
+  if (signal_number != ProfileEventSource::NO_SIGNAL) {
     struct sigaction sa;
     sa.sa_sigaction = SignalHandler;
     sa.sa_flags = SA_RESTART | SA_SIGINFO;
@@ -481,7 +493,7 @@ void ProfileHandler::DisableHandler() {
 
   const int signal_number = event_source_->GetSignal();
 
-  if (signal_number) {
+  if (signal_number != ProfileEventSource::NO_SIGNAL) {
     struct sigaction sa;
     sa.sa_handler = SIG_IGN;
     sa.sa_flags = SA_RESTART;
